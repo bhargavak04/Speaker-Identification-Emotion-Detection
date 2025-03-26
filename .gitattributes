@@ -1,2 +1,0 @@
-ModelOpen/wavv2vec/pytorch_model.bin filter=lfs diff=lfs merge=lfs -text
-ModelOpen/openw/whisper-small/pytorch_model.bin filter=lfs diff=lfs merge=lfs -text
