@@ -1,3 +1,0 @@
-ModelOpen/**/*.bin filter=lfs diff=lfs merge=lfs -text
-ModelOpen/**/*.h5 filter=lfs diff=lfs merge=lfs -text
-ModelOpen/**/*.pth filter=lfs diff=lfs merge=lfs -text
