@@ -19,7 +19,7 @@ Built with **Python, FastAPI, and PyTorch**, it provides a REST API for:
 
 ### **1. Clone the Repository**  
 ```bash
-git clone https://github.com/<your-username>/SID-ED.git
+git clone (https://github.com/bhargavak04/Speaker-Identification-Emotion-Detection).git
 cd SID-ED
 ```
 
