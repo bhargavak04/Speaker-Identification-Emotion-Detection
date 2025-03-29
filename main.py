@@ -10,72 +10,94 @@ from sqlalchemy import create_engine, Column, Integer, String, LargeBinary
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
 import uvicorn
 
-# Device and Environment Setup
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-os.environ["HF_HUB_LOCAL_STRATEGY"] = "copy"
+# ======================
+# CLOUD CONFIGURATION
+# ======================
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CACHE_DIR = "./model_cache"  # For Render persistent storage
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Database Setup
+# ======================
+# DATABASE SETUP
+# ======================
+DATABASE_URL = "sqlite:///./speaker_database.db"
 Base = declarative_base()
-engine = create_engine('sqlite:///speaker_database.db')
-SessionLocal = sessionmaker(bind=engine)
 
 class SpeakerModel(Base):
     __tablename__ = 'speakers'
-    
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     embedding = Column(LargeBinary)
 
-# Create database tables
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
 Base.metadata.create_all(bind=engine)
 
-# Model Loading (moved to top to ensure availability)
+# ======================
+# MODEL INITIALIZATION
+# ======================
+print("Initializing models (will auto-download if missing)...")
+
+# 1. Speaker Recognition Model
 from speechbrain.pretrained import SpeakerRecognition
-from transformers import pipeline, WhisperForConditionalGeneration, WhisperProcessor
-
-print("Loading models...")
-spkrec = SpeakerRecognition.from_hparams(
+spkrec_model = SpeakerRecognition.from_hparams(
     source="speechbrain/spkrec-ecapa-voxceleb",
-    savedir="pretrained_ecapa_tdnn"
-).to(device)
+    savedir=os.path.join(CACHE_DIR, "ecapa_model"),
+    run_opts={"device": DEVICE}
+).to(DEVICE)
 
-whisper_processor = WhisperProcessor.from_pretrained(r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\openw\whisper-small")
-whisper_model = WhisperForConditionalGeneration.from_pretrained(r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\openw\whisper-small")
+# 2. Whisper Speech-to-Text
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
+whisper_processor = WhisperProcessor.from_pretrained(
+    "openai/whisper-small",
+    cache_dir=CACHE_DIR
+)
+whisper_model = WhisperForConditionalGeneration.from_pretrained(
+    "openai/whisper-small",
+    cache_dir=CACHE_DIR
+).to(DEVICE)
 
-emotion_classifier = pipeline("audio-classification", model=r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\wavv2vec")
+# 3. Emotion Detection
+from transformers import pipeline
+emotion_classifier = pipeline(
+    "audio-classification",
+    model="superb/wav2vec2-base-superb-er",
+    device=0 if DEVICE.type == "cuda" else -1,
+    cache_dir=CACHE_DIR
+)
 
-# Constants
+# ======================
+# CORE FUNCTIONALITY
+# ======================
 ENROLLMENT_DIR = Path("enrolled_speakers")
 ENROLLMENT_DIR.mkdir(exist_ok=True)
 EMBEDDING_DIM = 192
 
 def convert_to_wav(file_path):
-    """Converts audio to WAV if it's not already in WAV format."""
-    if isinstance(file_path, str) and file_path.lower().endswith(".wav"):
-        return file_path  
-
+    """Universal audio to WAV converter"""
     try:
-        # If file is an UploadFile from FastAPI
+        if isinstance(file_path, str) and file_path.lower().endswith(".wav"):
+            return file_path
+
         if hasattr(file_path, 'file'):
             temp_path = f"temp_{file_path.filename}"
             with open(temp_path, "wb") as buffer:
                 buffer.write(file_path.file.read())
             file_path = temp_path
 
-        new_file_path = file_path.rsplit(".", 1)[0] + ".wav"
+        output_path = file_path.rsplit(".", 1)[0] + ".wav"
         audio = AudioSegment.from_file(file_path)
-        audio = audio.set_frame_rate(16000).set_channels(1)  # Ensure 16kHz mono
-        audio.export(new_file_path, format="wav")
-        return new_file_path
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        audio.export(output_path, format="wav")
+        return output_path
     except Exception as e:
-        print(f"Error converting {file_path} to WAV: {str(e)}")
+        print(f"Conversion error: {str(e)}")
         return None
 
 def apply_vad(audio_path, aggressiveness=3):
-    """Removes silence & noise using WebRTC VAD."""
+    """Voice activity detection with WebRTC"""
     try:
         signal, sr = librosa.load(audio_path, sr=16000, mono=True)
         signal = (signal * 32767).astype(np.int16)
@@ -84,60 +106,64 @@ def apply_vad(audio_path, aggressiveness=3):
         signal = signal[:len(signal) - (len(signal) % frame_length)]
         frames = np.array_split(signal, len(signal) // frame_length)
         voiced_frames = [frame for frame in frames if vad.is_speech(frame.tobytes(), 16000)]
-        
-        if not voiced_frames:
-            return None
-            
-        return np.concatenate(voiced_frames)
+        return np.concatenate(voiced_frames) if voiced_frames else None
     except Exception as e:
-        print(f"Error in VAD processing: {str(e)}")
+        print(f"VAD error: {str(e)}")
         return None
 
-def extract_speaker_embedding(audio_path):
-    """Extracts speaker embedding using ECAPA-TDNN model."""
+def extract_embedding(audio_path):
+    """ECAPA-TDNN embedding extraction"""
     try:
         signal, sr = torchaudio.load(audio_path)
         if sr != 16000:
             signal = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)(signal)
-        if signal.shape[0] > 1:
-            signal = signal.mean(dim=0, keepdim=True)
-        if signal.shape[1] < 16000:  # Require at least 1 second of audio
+        signal = signal.mean(dim=0, keepdim=True) if signal.shape[0] > 1 else signal
+        if signal.shape[1] < 16000:
             return None
             
-        signal = signal.to(device)
+        signal = signal.to(DEVICE)
         with torch.no_grad():
-            embedding = spkrec.encode_batch(signal).squeeze().detach().cpu().numpy()
+            embedding = spkrec_model.encode_batch(signal).squeeze().cpu().numpy()
 
+        # Normalize embedding dimensions
         if len(embedding) > EMBEDDING_DIM:
             embedding = embedding[:EMBEDDING_DIM]
         elif len(embedding) < EMBEDDING_DIM:
-            embedding = np.pad(embedding, (0, EMBEDDING_DIM - len(embedding)), 'constant')
-
+            embedding = np.pad(embedding, (0, EMBEDDING_DIM - len(embedding)))
         return embedding
     except Exception as e:
-        print(f"Error extracting embedding: {str(e)}")
+        print(f"Embedding error: {str(e)}")
         return None
 
-def save_speaker_to_database(speaker_name, embedding):
-    """Save speaker embedding to the database."""
+def database_operation(name=None, embedding=None, mode="save"):
+    """Unified database handler"""
     session = SessionLocal()
     try:
-        # Convert numpy array to bytes for storage
-        embedding_bytes = embedding.tobytes()
-        
-        # Check if speaker already exists
-        existing_speaker = session.query(SpeakerModel).filter_by(name=speaker_name).first()
-        
-        if existing_speaker:
-            # Update existing speaker
-            existing_speaker.embedding = embedding_bytes
-        else:
-            # Create new speaker entry
-            new_speaker = SpeakerModel(name=speaker_name, embedding=embedding_bytes)
-            session.add(new_speaker)
-        
-        session.commit()
-        return True
+        if mode == "save":
+            embedding_bytes = embedding.tobytes()
+            existing = session.query(SpeakerModel).filter_by(name=name).first()
+            if existing:
+                existing.embedding = embedding_bytes
+            else:
+                session.add(SpeakerModel(name=name, embedding=embedding_bytes))
+            session.commit()
+            return True
+            
+        elif mode == "identify":
+            speakers = session.query(SpeakerModel).all()
+            if not speakers:
+                return "No speakers enrolled"
+                
+            scores = []
+            for speaker in speakers:
+                db_embed = np.frombuffer(speaker.embedding, dtype=np.float32)
+                score = np.dot(embedding, db_embed) / (np.linalg.norm(embedding) * np.linalg.norm(db_embed))
+                scores.append((speaker.name, score))
+            
+            scores.sort(key=lambda x: x[1], reverse=True)
+            best_match, confidence = scores[0]
+            return f"{best_match} (confidence: {confidence:.2f})" if confidence > 0.5 else "Unknown"
+            
     except Exception as e:
         session.rollback()
         print(f"Database error: {str(e)}")
@@ -145,128 +171,79 @@ def save_speaker_to_database(speaker_name, embedding):
     finally:
         session.close()
 
-def identify_speaker_from_database(test_embedding):
-    """Identify speaker from database using cosine similarity."""
-    session = SessionLocal()
-    try:
-        speakers = session.query(SpeakerModel).all()
-        
-        scores = []
-        for speaker in speakers:
-            # Convert bytes back to numpy array
-            db_embedding = np.frombuffer(speaker.embedding, dtype=np.float32)
-            
-            # Compute cosine similarity
-            score = np.dot(test_embedding, db_embedding) / (np.linalg.norm(test_embedding) * np.linalg.norm(db_embedding))
-            scores.append((speaker.name, score))
-        
-        # Sort scores in descending order
-        scores.sort(key=lambda x: x[1], reverse=True)
-        
-        if not scores:
-            return "No enrolled speakers found"
-        
-        best_speaker, best_score = scores[0]
-        second_best_score = scores[1][1] if len(scores) > 1 else 0
-        
-        if best_score > 0.5 and (best_score - second_best_score) > 0.05:
-            return f"{best_speaker} (confidence: {best_score:.2f})"
-        return "Unknown Speaker"
-    
-    except Exception as e:
-        print(f"Database identification error: {str(e)}")
-        return "Error in speaker identification"
-    finally:
-        session.close()
+# ======================
+# FASTAPI ENDPOINTS
+# ======================
+app = FastAPI(title="Cloud Speaker Recognition API")
 
-def transcribe_audio(audio_file):
-    """Transcribe speech using OpenAI Whisper."""
+@app.post("/enroll")
+async def enroll_speaker(name: str, audio: UploadFile = File(...)):
+    """Speaker enrollment endpoint"""
+    wav_path = convert_to_wav(audio)
+    if not wav_path:
+        raise HTTPException(400, "Audio conversion failed")
+    
+    vad_audio = apply_vad(wav_path)
+    if vad_audio is None:
+        os.remove(wav_path)
+        raise HTTPException(400, "No speech detected")
+    
+    embedding = extract_embedding(wav_path)
+    if embedding is None:
+        os.remove(wav_path)
+        raise HTTPException(400, "Embedding extraction failed")
+    
+    if database_operation(name=name, embedding=embedding, mode="save"):
+        os.remove(wav_path)
+        return {"status": f"Speaker {name} enrolled successfully"}
+    raise HTTPException(500, "Database operation failed")
+
+@app.post("/recognize")
+async def recognize_speaker(audio: UploadFile = File(...)):
+    """Speaker recognition endpoint"""
+    wav_path = convert_to_wav(audio)
+    if not wav_path:
+        raise HTTPException(400, "Audio conversion failed")
+    
+    embedding = extract_embedding(wav_path)
+    if embedding is None:
+        os.remove(wav_path)
+        raise HTTPException(400, "Embedding extraction failed")
+    
+    speaker_id = database_operation(embedding=embedding, mode="identify")
+    
+    # Additional processing
+    transcription = transcribe_audio(wav_path)
+    emotion = detect_emotion(wav_path)
+    os.remove(wav_path)
+    
+    return {
+        "speaker": speaker_id,
+        "transcription": transcription,
+        "emotion": emotion
+    }
+
+def transcribe_audio(audio_path):
+    """Whisper transcription with error handling"""
     try:
-        audio, _ = librosa.load(audio_file, sr=16000)
-        input_features = whisper_processor(audio, sampling_rate=16000, return_tensors="pt").input_features
-        predicted_ids = whisper_model.generate(input_features)
+        audio, _ = librosa.load(audio_path, sr=16000)
+        inputs = whisper_processor(audio, sampling_rate=16000, return_tensors="pt").input_features.to(DEVICE)
+        with torch.no_grad():
+            predicted_ids = whisper_model.generate(inputs)
         return whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
     except Exception as e:
-        return f"Error transcribing audio: {str(e)}"
+        return f"Transcription error: {str(e)}"
 
-def detect_emotion(audio_file):
-    """Detect emotion from the audio file."""
+def detect_emotion(audio_path):
+    """Emotion classification with error handling"""
     try:
-        result = emotion_classifier(audio_file)
+        result = emotion_classifier(audio_path)
         return result[0]["label"]
     except Exception as e:
-        return f"Error detecting emotion: {str(e)}"
+        return f"Emotion detection error: {str(e)}"
 
-# FastAPI Application
-app = FastAPI(title="Speaker Recognition API")
-
-@app.post("/enroll-speaker/")
-async def enroll_speaker_endpoint(
-    name: str, 
-    audio: UploadFile = File(...)
-):
-    """Endpoint to enroll a new speaker."""
-    try:
-        # Save uploaded file and convert to WAV
-        wav_file = convert_to_wav(audio)
-        if not wav_file:
-            raise HTTPException(status_code=400, detail="Failed to convert audio")
-        
-        vad_audio = apply_vad(wav_file)
-        if vad_audio is None:
-            raise HTTPException(status_code=400, detail="No valid speech detected")
-        
-        embedding = extract_speaker_embedding(wav_file)
-        if embedding is None:
-            raise HTTPException(status_code=400, detail="Failed to extract speaker embedding")
-        
-        # Save to database
-        if save_speaker_to_database(name, embedding):
-            # Clean up temporary file if created
-            if wav_file.startswith('temp_'):
-                os.remove(wav_file)
-            return {"status": "Speaker enrolled successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to save speaker to database")
-    
-    except Exception as e:
-        return HTTPException(status_code=500, detail=str(e))
-
-@app.post("/process-audio/")
-async def process_audio_endpoint(
-    audio: UploadFile = File(...)
-):
-    """Endpoint to process audio and return speaker, transcription, and emotion."""
-    try:
-        # Save uploaded file and convert to WAV
-        wav_file = convert_to_wav(audio)
-        if not wav_file:
-            raise HTTPException(status_code=400, detail="Failed to convert audio")
-        
-        # Extract embedding for speaker identification
-        test_embedding = extract_speaker_embedding(wav_file)
-        if test_embedding is None:
-            raise HTTPException(status_code=400, detail="Failed to extract speaker embedding")
-        
-        # Identify speaker from database
-        speaker = identify_speaker_from_database(test_embedding)
-        
-        # Transcribe and detect emotion
-        transcription = transcribe_audio(wav_file)
-        emotion = detect_emotion(wav_file)
-        
-        # Clean up temporary file if created
-        if wav_file.startswith('temp_'):
-            os.remove(wav_file)
-        
-        return {
-            "speaker": speaker,
-            "transcription": transcription,
-            "emotion": emotion
-        }
-    
-    except Exception as e:
-        return HTTPException(status_code=500, detail=str(e))
-
+# ======================
+# STARTUP CONFIG
+# ======================
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
