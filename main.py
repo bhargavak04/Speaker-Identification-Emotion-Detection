@@ -42,8 +42,8 @@ spkrec = SpeakerRecognition.from_hparams(
     savedir="pretrained_ecapa_tdnn"
 ).to(device)
 
-whisper_processor = WhisperProcessor.from_pretrained(r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\openw\whisper-small")
-whisper_model = WhisperForConditionalGeneration.from_pretrained(r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\openw\whisper-small")
+whisper_processor = WhisperProcessor.from_pretrained("openai/whisper-tiny")
+whisper_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny")
 
 emotion_classifier = pipeline("audio-classification", model=r"C:\Users\bharg\Downloads\SID&ED\ModelOpen\wavv2vec")
 
