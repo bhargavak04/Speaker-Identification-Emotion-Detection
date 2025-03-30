@@ -290,6 +290,13 @@ def detect_emotion(audio_file):
 
 # Create memory-efficient FastAPI app
 app = FastAPI(title="Speaker Recognition API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Add endpoints to unload models to free memory when needed
 @app.post("/unload-models/")
