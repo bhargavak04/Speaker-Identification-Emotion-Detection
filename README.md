@@ -18,8 +18,8 @@ This project leverages several state-of-the-art deep learning models:
 
 - **Speaker Recognition**: [speechbrain/spkrec-ecapa-voxceleb](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb) - ECAPA-TDNN model trained on VoxCeleb
 - **Speech Transcription**: [openai/whisper-small](https://huggingface.co/openai/whisper-small) - Whisper automatic speech recognition model
-- **Emotion Detection**: [wav2vec2 model for emotion recognition](https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition)
-- **Text-to-Speech**: [Parler TTS for Indian languages](https://huggingface.co/ai4bharat/indic-parler-tts)
+- **Emotion Detection**: [wav2vec2 model for emotion recognition](https://huggingface.co/ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition)- Facebook's Wav2vec for emotion detection
+- **Text-to-Speech**: [Parler TTS for Indian languages](https://huggingface.co/ai4bharat/indic-parler-tts) - Indic Parler TTS for text to speech in indian accent &  voices
 
 ## Architecture
 
