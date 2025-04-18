@@ -1,3 +1,15 @@
 env/
 ModelOpen/
 pretrained_ecapa_tdnn/
+Audio_Formatted/
+enrolled_speakers/
+envs/
+indic_parler/
+enroll_try.py
+indic_try.py
+main.py
+proc_aud_api.py
+speaker_database.db
+temp_Bode_yaswanth_kumar_Angry.mp3
+test_yaswanth_neu.wav
+with_bow.py
